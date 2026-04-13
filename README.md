@@ -79,5 +79,21 @@ The dataset contains patient-level hospital records including:
 ## 🚀 How to Run
 
 ### 1. Install dependencies
-```bash
+
 pip install -r requirements.txt
+
+### 2. Run Streamlit app
+
+streamlit run healthcare_clustering_streamlit_app.py
+
+---
+
+## 📂 Project Structure
+
+├── notebook.ipynb
+├── healthcare_clustering_streamlit_app.py
+├── requirements.txt
+├── README.md
+
+
+
