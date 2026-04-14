@@ -1,6 +1,5 @@
 import io
 import textwrap
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -10,8 +9,15 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
-st.set_page_config(page_title="Healthcare Clustering Dashboard", layout="wide")
+
+mode = st.selectbox(
+    "Choose Mode",
+    ["Clustering", "Classification"]
+)
 
 st.title("Healthcare Patient Clustering Dashboard")
 st.caption("Interactive dashboard for patient clustering, visualizations, and business insights")
@@ -20,6 +26,44 @@ TARGET_COL = "readmitted"
 DEFAULT_CAT_COLS = ["gender", "primary_diagnosis", "discharge_to"]
 DEFAULT_NUM_COLS = ["age", "num_procedures", "days_in_hospital", "comorbidity_score"]
 
+def preprocess_and_classify(df, selected_num_cols, selected_cat_cols):
+    work_df = df.copy()
+
+    if TARGET_COL not in work_df.columns:
+        st.error("Target column not found")
+        st.stop()
+
+    X = work_df[selected_num_cols + selected_cat_cols].copy()
+    y = work_df[TARGET_COL]
+
+    # cleaning
+    for col in selected_num_cols:
+        X[col] = pd.to_numeric(X[col], errors="coerce")
+        X[col] = X[col].fillna(X[col].median())
+
+    for col in selected_cat_cols:
+        X[col] = X[col].astype(str)
+
+    # encoding
+    X = pd.get_dummies(X)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42
+    )
+
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_val)
+
+    acc = accuracy_score(y_val, y_pred)
+    report = classification_report(y_val, y_pred, output_dict=True)
+    cm = confusion_matrix(y_val, y_pred)
+
+    return acc, report, cm
 
 def safe_mode(series: pd.Series):
     mode = series.mode(dropna=True)
@@ -72,7 +116,6 @@ def load_data(uploaded_file) -> pd.DataFrame:
     if name.endswith(".xlsx"):
         return pd.read_excel(uploaded_file)
     raise ValueError("Please upload a CSV or XLSX file.")
-
 
 @st.cache_data
 def preprocess_and_cluster(
@@ -191,52 +234,107 @@ if not selected_num_cols and not selected_cat_cols:
     st.warning("Choose at least one feature for clustering.")
     st.stop()
 
-result_df, encoded_df, pca_df, silhouette, numeric_summary, categorical_summary = preprocess_and_cluster(
-    df,
-    selected_num_cols=selected_num_cols,
-    selected_cat_cols=selected_cat_cols,
-    n_clusters=n_clusters,
-    random_state=random_state,
-)
+numeric_summary = pd.DataFrame()
+categorical_summary = {}
+result_df = pd.DataFrame()
+encoded_df = pd.DataFrame()
+pca_df = pd.DataFrame()
+silhouette = None
 
-st.subheader("2) Clustering Overview")
-metric_cols = st.columns(3)
-metric_cols[0].metric("Clusters", n_clusters)
-metric_cols[1].metric("Encoded features", encoded_df.shape[1])
-metric_cols[2].metric("Silhouette score", f"{silhouette:.3f}" if silhouette is not None else "N/A")
+if mode == "Clustering":
+    result_df, encoded_df, pca_df, silhouette, numeric_summary, categorical_summary = preprocess_and_cluster(
+        df,
+        selected_num_cols,
+        selected_cat_cols,
+        n_clusters,
+        random_state,
+    )
 
-cluster_counts = result_df["cluster"].value_counts().sort_index().reset_index()
-cluster_counts.columns = ["cluster", "count"]
+elif mode == "Classification":
+    acc, report, cm = preprocess_and_classify(
+        df,
+        selected_num_cols,
+        selected_cat_cols,
+    )
 
-fig_counts = px.bar(
-    cluster_counts,
-    x="cluster",
-    y="count",
-    title="Cluster Sizes",
-    text="count",
-)
-fig_counts.update_layout(xaxis_title="Cluster", yaxis_title="Patients")
+    st.subheader("2) Classification Overview")
+    st.metric("Accuracy", f"{acc:.3f}")
 
-fig_pca = px.scatter(
-    pca_df,
-    x="PC1",
-    y="PC2",
-    color="cluster",
-    title="Patient Clusters in 2D PCA Space",
-    opacity=0.75,
-)
+    st.subheader("Classification Report")
+    report_df = pd.DataFrame(report).transpose()
+    st.dataframe(report_df)
 
-left, right = st.columns(2)
-left.plotly_chart(fig_counts, use_container_width=True)
-right.plotly_chart(fig_pca, use_container_width=True)
+    st.subheader("Confusion Matrix")
+    fig_cm = px.imshow(cm, text_auto=True, title="Confusion Matrix")
+    st.plotly_chart(fig_cm, use_container_width=True)
+
+    st.subheader("Feature Importance")
+
+    X = pd.get_dummies(df[selected_num_cols + selected_cat_cols])
+    y = df[TARGET_COL]
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    model = RandomForestClassifier(n_estimators=100)
+    model.fit(X_scaled, y)
+
+    importances = model.feature_importances_
+    feat_imp = pd.Series(importances, index=X.columns).sort_values(ascending=False)
+
+    fig_imp = px.bar(feat_imp.head(10), title="Top 10 Important Features")
+    st.plotly_chart(fig_imp, use_container_width=True)
+
+    st.stop()
+
+if mode == "Clustering":
+
+    st.subheader("2) Clustering Overview")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Clusters", n_clusters)
+    metric_cols[1].metric("Encoded features", encoded_df.shape[1])
+    metric_cols[2].metric("Silhouette score", f"{silhouette:.3f}" if silhouette is not None else "N/A")
+
+    cluster_counts = result_df["cluster"].value_counts().sort_index().reset_index()
+    cluster_counts.columns = ["cluster", "count"]
+
+    fig_counts = px.bar(
+        cluster_counts,
+        x="cluster",
+        y="count",
+        title="Cluster Sizes",
+        text="count",
+    )
+    fig_counts.update_layout(xaxis_title="Cluster", yaxis_title="Patients")
+
+    fig_pca = px.scatter(
+        pca_df,
+        x="PC1",
+        y="PC2",
+        color="cluster",
+        title="Patient Clusters in 2D PCA Space",
+        opacity=0.75,
+    )
+
+    left, right = st.columns(2)
+    left.plotly_chart(fig_counts, use_container_width=True)
+    right.plotly_chart(fig_pca, use_container_width=True)
 
 st.subheader("3) Cluster Profiling")
 profile_tab1, profile_tab2, profile_tab3 = st.tabs(["Numeric Summary", "Categorical Summary", "Cluster Data"])
 
 with profile_tab1:
-    st.dataframe(numeric_summary, use_container_width=True)
-    if not numeric_summary.empty:
-        heatmap_df = numeric_summary.reset_index().melt(id_vars="cluster", var_name="feature", value_name="value")
+    if numeric_summary is not None and not numeric_summary.empty:
+        st.dataframe(numeric_summary, use_container_width=True)
+
+        heatmap_df = numeric_summary.reset_index()
+
+        heatmap_df = heatmap_df.melt(
+            id_vars=heatmap_df.columns[0],
+            var_name="feature",
+            value_name="value"
+        )
+
         fig_heatmap = px.density_heatmap(
             heatmap_df,
             x="feature",
@@ -246,7 +344,11 @@ with profile_tab1:
             text_auto=True,
             title="Average Numeric Profile per Cluster",
         )
+
         st.plotly_chart(fig_heatmap, use_container_width=True)
+
+    else:
+        st.info("No numeric cluster summary available (you are likely in Classification mode).")
 
 with profile_tab2:
     if categorical_summary:
@@ -320,26 +422,30 @@ with chart_tab3:
     else:
         st.info("No numeric columns available for plotting.")
 
-st.subheader("5) Business Insights Panel")
-insights = build_insights(result_df, cluster_col="cluster")
-for i, insight in enumerate(insights, start=1):
-    st.markdown(f"**Insight {i}.** {insight}")
+if mode == "Clustering":
 
-st.subheader("6) Interpretation Notes for Your Report")
-with st.expander("Suggested discussion text"):
-    discussion = f"""
-    - The dataset was clustered into {n_clusters} patient segments using K-Means after encoding categorical features and scaling numeric variables.
-    - The silhouette score is {silhouette:.3f}.
-    - Cluster profiling shows how patient groups differ in age, procedures, hospital stay, comorbidity burden, diagnosis mix, and readmission behavior.
-    - If cluster differences appear weak, this is still a valid finding: it may indicate limited feature separability or a relatively homogeneous patient population.
-    - Recommended next steps include testing DBSCAN or hierarchical clustering, adding richer clinical features, and comparing clustering quality across methods.
-    """
-    st.code(textwrap.dedent(discussion).strip(), language="markdown")
+    st.subheader("5) Business Insights Panel")
+    insights = build_insights(result_df, cluster_col="cluster")
+    for i, insight in enumerate(insights, start=1):
+        st.markdown(f"**Insight {i}.** {insight}")
 
-csv_bytes = result_df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    label="Download clustered dataset",
-    data=csv_bytes,
-    file_name="clustered_patients.csv",
-    mime="text/csv",
-)
+    st.subheader("6) Interpretation Notes for Your Report")
+    with st.expander("Suggested discussion text"):
+        discussion = f"""
+        - The dataset was clustered into {n_clusters} patient segments using K-Means after encoding categorical features and scaling numeric variables.
+        - The silhouette score is {silhouette:.3f}.
+        - Cluster profiling shows how patient groups differ in age, procedures, hospital stay, comorbidity burden, diagnosis mix, and readmission behavior.
+        - If cluster differences appear weak, this is still a valid finding: it may indicate limited feature separability or a relatively homogeneous patient population.
+        - Recommended next steps include testing DBSCAN or hierarchical clustering, adding richer clinical features, and comparing clustering quality across methods.
+        """
+        st.code(textwrap.dedent(discussion).strip(), language="markdown")
+
+    csv_bytes = result_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download clustered dataset",
+        data=csv_bytes,
+        file_name="clustered_patients.csv",
+        mime="text/csv",
+    )
+
+
